@@ -1,0 +1,20 @@
+{
+  "name": "chat-relayer-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx sidecar-server.ts"
+  },
+  "dependencies": {
+    "@mysten/seal": "^0.2.0",
+    "@mysten/sui": "^1.0.0",
+    "@mysten/walrus": "^0.1.0",
+    "fastify": "^4.28.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.4.5",
+    "@types/node": "^20.12.12"
+  }
+}
