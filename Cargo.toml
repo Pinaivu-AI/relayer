@@ -1,0 +1,12 @@
+[workspace]
+# The chat-relayer's nautilus-style support crates are shared with the
+# coordinator/memwal-relayer — pulled in by path during local dev and
+# packed into the EIF by the Containerfile at build time.
+members = []
+
+# The relayer binary lives outside the workspace because its profile +
+# release tuning need to be independent (panic=abort, lto). Same pattern
+# as nautilus-memwal-relayer.
+exclude = ["src/relayer"]
+
+resolver = "2"

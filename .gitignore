@@ -1,0 +1,9 @@
+/target/
+/src/relayer/target/
+/src/relayer/scripts/node_modules/
+*.env
+*.env.*
+docker-compose.yml
+*.eif
+*.pcrs
+out/
