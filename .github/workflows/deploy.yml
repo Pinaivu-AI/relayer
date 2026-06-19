@@ -1,0 +1,326 @@
+name: Deploy Chat Relayer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-chat-relayer
+  cancel-in-progress: true
+
+env:
+  APP_DIR: pinaivu-relayer
+  # Coordinator must already be checked out on the host (its own
+  # deploy.yml keeps this path current) — chat-relayer's Containerfile
+  # needs it as a secondary build context for nautilus-enclave,
+  # pinaivu-protocol, aws, and system.
+  COORDINATOR_DIR: pinaivu-coordinator
+  ENCLAVE_CPU: 2
+  ENCLAVE_MEM: 2048
+  HTTP_VSOCK_PORT: 4002
+  CONFIG_VSOCK_PORT: 7000
+  POSTGRES_VSOCK_PORT: 8101
+  REDIS_VSOCK_PORT: 8102
+  SUI_VSOCK_PORT: 8103
+  EMBEDDING_VSOCK_PORT: 8104
+  WALRUS_PUBLISHER_VSOCK_PORT: 8105
+  WALRUS_AGGREGATOR_VSOCK_PORT: 8106
+  PINAIVU_API_VSOCK_PORT: 8107
+  ENCLAVE_LOG_VSOCK_PORT: 5000
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Copy source to EC2 ────────────────────────────────────────────────
+      - name: Copy source to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PINAIVU_EC2_HOST }}
+          username: ${{ secrets.PINAIVU_EC2_USER }}
+          key: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+          source: "Containerfile,src,Cargo.toml,Makefile,.gitignore,parent_forwarder.sh"
+          target: "~/pinaivu-relayer/"
+          overwrite: true
+          rm: false
+
+      # ── Write env file to EC2 ─────────────────────────────────────────────
+      # PINAIVU_RELAYER_ENV_FILE is a GitHub secret with the full contents
+      # of the runtime .env (DATABASE_URL, REDIS_URL, MEMORY_ENCRYPTION_KEY,
+      # WALRUS_*, EMBEDDING_*, PINAIVU_API_BASE, SUI_RPC_URL, …).
+      - name: Write env file to EC2
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+          PINAIVU_RELAYER_ENV_FILE: ${{ secrets.PINAIVU_RELAYER_ENV_FILE }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          printf '%s' "$PINAIVU_RELAYER_ENV_FILE" | \
+            ssh -o StrictHostKeyChecking=no \
+                -o ServerAliveInterval=30 \
+                -i /tmp/deploy_key \
+                "$EC2_USER@$EC2_HOST" \
+                "cat > ~/.env.relayer.runtime && chmod 600 ~/.env.relayer.runtime"
+          rm -f /tmp/deploy_key
+
+      # ── Build EIF on EC2 ──────────────────────────────────────────────────
+      - name: Build enclave image
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH "GIT_SHA=$GIT_SHA bash -s" << 'REMOTE'
+          set -e
+          cd ~/pinaivu-relayer
+
+          if [ ! -d ~/pinaivu-coordinator/src/nautilus-enclave ]; then
+              echo "ERROR: ~/pinaivu-coordinator not found (coordinator's own deploy.yml must run at least once first)"
+              exit 1
+          fi
+
+          if [ -f out/.build-sha ] && \
+             [ -f out/chat-relayer.eif ] && \
+             [ -f out/chat-relayer.pcrs ] && \
+             [ "$(cat out/.build-sha)" = "$GIT_SHA" ]; then
+              echo "Source unchanged ($GIT_SHA); reusing existing build."
+              cat out/chat-relayer.pcrs
+              exit 0
+          fi
+
+          USED=$(df --output=pcent / | tail -1 | tr -dc 0-9)
+          if [ "${USED:-0}" -ge 70 ]; then
+              echo "Disk ${USED}% used — pruning docker cache."
+              sudo docker system prune -af --volumes || true
+          fi
+
+          mkdir -p out
+          sudo docker buildx build \
+            --platform linux/amd64 \
+            --progress=plain \
+            --build-context coordinator=$HOME/pinaivu-coordinator \
+            --output type=local,dest=out/ \
+            -f Containerfile . 2>&1 | tee out/docker.log
+          echo "$GIT_SHA" > out/.build-sha
+          echo "--- PCR Measurements ---"
+          cat out/chat-relayer.pcrs
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Tear down old enclave ─────────────────────────────────────────────
+      - name: Terminate old enclave
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          for svc in \
+            pinaivu-relayer-bridge-http \
+            pinaivu-relayer-logs \
+            pinaivu-relayer-outbound-postgres \
+            pinaivu-relayer-outbound-redis \
+            pinaivu-relayer-outbound-sui \
+            pinaivu-relayer-outbound-embedding \
+            pinaivu-relayer-outbound-walrus-pub \
+            pinaivu-relayer-outbound-walrus-agg \
+            pinaivu-relayer-outbound-pinaivu-api; do
+            sudo systemctl stop "$svc.service" 2>/dev/null || true
+          done
+
+          # Only terminate THIS enclave, not the coordinator's — find it by
+          # the relayer's distinctive EIF path so a shared host doesn't
+          # accidentally kill the coordinator's running enclave.
+          RELAYER_EID=$(sudo nitro-cli describe-enclaves \
+            | jq -r '.[] | select(.EnclaveCID != null) | select(.EIFPath | test("chat-relayer")) | .EnclaveID' \
+            | head -1)
+          if [ -n "$RELAYER_EID" ]; then
+            sudo nitro-cli terminate-enclave --enclave-id "$RELAYER_EID" || true
+          fi
+          sleep 5
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Launch new enclave ────────────────────────────────────────────────
+      - name: Launch enclave
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          sudo nitro-cli run-enclave \
+            --cpu-count 2 \
+            --memory 2048 \
+            --eif-path ~/pinaivu-relayer/out/chat-relayer.eif
+          sudo nitro-cli describe-enclaves \
+            | jq -r '.[] | select(.EIFPath | test("chat-relayer")) | "CID: \(.EnclaveCID)  State: \(.State)"'
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Setup host-side VSOCK bridges + outbound systemd services ─────────
+      - name: Setup VSOCK bridge
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+
+          set -a
+          # shellcheck source=/dev/null
+          source ~/.env.relayer.runtime
+          set +a
+
+          write_unit() {
+            dest="$1"; shift
+            printf '%s\n' "$@" | sudo tee "$dest" > /dev/null
+          }
+
+          url_host() { printf '%s' "$1" | sed -nE 's#https?://([^/:]+).*#\1#p'; }
+          url_port() {
+            local p
+            p=$(printf '%s' "$1" | sed -nE 's#https?://[^/:]+:?([0-9]*).*#\1#p')
+            printf '%s' "${p:-443}"
+          }
+
+          CID=$(sudo nitro-cli describe-enclaves \
+            | jq -r '.[] | select(.EIFPath | test("chat-relayer")) | .EnclaveCID' | head -1)
+          [ -z "$CID" ] && { echo "ERROR: no relayer enclave CID"; exit 1; }
+
+          write_unit /etc/systemd/system/pinaivu-relayer-bridge-http.service \
+            '[Unit]' 'Description=Chat relayer HTTP bridge (TCP:4002 <-> VSOCK:4002)' 'After=network.target' \
+            '[Service]' "ExecStart=/usr/bin/socat TCP-LISTEN:4002,reuseaddr,fork VSOCK-CONNECT:${CID}:4002" \
+            'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=multi-user.target'
+
+          write_unit /etc/systemd/system/pinaivu-relayer-logs.service \
+            '[Unit]' 'Description=Chat relayer log collector (VSOCK:5000)' 'After=network.target' \
+            '[Service]' 'ExecStart=/usr/bin/socat VSOCK-LISTEN:5000,fork,reuseaddr OPEN:/tmp/chat-relayer.log,creat,append' \
+            'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=multi-user.target'
+
+          PG_HOST=$(printf '%s' "$DATABASE_URL" | sed -nE 's#.*@([^:/]+).*#\1#p')
+          PG_PORT=$(printf '%s' "$DATABASE_URL" | sed -nE 's#.*@[^:]+:([0-9]+).*#\1#p'); PG_PORT="${PG_PORT:-5432}"
+          write_unit /etc/systemd/system/pinaivu-relayer-outbound-postgres.service \
+            '[Unit]' "Description=Relayer outbound Postgres (VSOCK:8101 -> ${PG_HOST}:${PG_PORT})" 'After=network.target' \
+            '[Service]' "ExecStart=/usr/bin/socat VSOCK-LISTEN:8101,fork,reuseaddr TCP4:${PG_HOST}:${PG_PORT}" \
+            'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=multi-user.target'
+
+          REDIS_HOST=$(printf '%s' "$REDIS_URL" | sed -nE 's#^[a-z]+://([^:]+:)?[^@]+@([^:/@]+).*#\2#p')
+          REDIS_PORT=$(printf '%s' "$REDIS_URL" | sed -nE 's#.*@[^:]+:([0-9]+).*#\1#p'); REDIS_PORT="${REDIS_PORT:-6379}"
+          write_unit /etc/systemd/system/pinaivu-relayer-outbound-redis.service \
+            '[Unit]' "Description=Relayer outbound Redis (VSOCK:8102 -> ${REDIS_HOST}:${REDIS_PORT})" 'After=network.target' \
+            '[Service]' "ExecStart=/usr/bin/socat VSOCK-LISTEN:8102,fork,reuseaddr TCP4:${REDIS_HOST}:${REDIS_PORT}" \
+            'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=multi-user.target'
+
+          declare -A egress=(
+            [sui]="8103:${SUI_RPC_URL:-https://fullnode.mainnet.sui.io}"
+            [embedding]="8104:${EMBEDDING_API_BASE:-}"
+            [walrus-pub]="8105:${WALRUS_PUBLISHER_URL:-}"
+            [walrus-agg]="8106:${WALRUS_AGGREGATOR_URL:-}"
+            [pinaivu-api]="8107:${PINAIVU_API_BASE:-}"
+          )
+          for name in "${!egress[@]}"; do
+            entry="${egress[$name]}"
+            port="${entry%%:*}"
+            url="${entry#*:}"
+            [ -z "$url" ] && continue
+            h=$(url_host "$url"); p=$(url_port "$url")
+            write_unit "/etc/systemd/system/pinaivu-relayer-outbound-${name}.service" \
+              '[Unit]' "Description=Relayer outbound ${name} (VSOCK:${port} -> ${h}:${p})" 'After=network.target' \
+              '[Service]' "ExecStart=/usr/bin/socat VSOCK-LISTEN:${port},fork,reuseaddr TCP4:${h}:${p}" \
+              'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=multi-user.target'
+          done
+
+          sudo systemctl stop pinaivu-relayer-logs.service 2>/dev/null || true
+          sudo truncate -s 0 /tmp/chat-relayer.log 2>/dev/null || true
+
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now \
+            pinaivu-relayer-bridge-http.service \
+            pinaivu-relayer-logs.service \
+            pinaivu-relayer-outbound-postgres.service \
+            pinaivu-relayer-outbound-redis.service \
+            $(for name in "${!egress[@]}"; do [ -n "${egress[$name]#*:}" ] && echo "pinaivu-relayer-outbound-${name}.service"; done)
+
+          sleep 2
+          sudo systemctl is-active pinaivu-relayer-bridge-http.service
+          echo "Bridges active: CID=$CID  TCP:4002->VSOCK:4002"
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Send config into the enclave ──────────────────────────────────────
+      - name: Send config to enclave
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          CID=$(sudo nitro-cli describe-enclaves \
+            | jq -r '.[] | select(.EIFPath | test("chat-relayer")) | .EnclaveCID' | head -1)
+          if [ -z "$CID" ]; then echo "ERROR: relayer enclave not running"; exit 1; fi
+
+          for i in $(seq 1 10); do
+            if awk 1 ~/.env.relayer.runtime 2>/dev/null \
+               | grep -v '^[[:space:]]*#' \
+               | grep -v '^[[:space:]]*$' \
+               | socat - VSOCK-CONNECT:$CID:7000 2>/dev/null; then
+              echo "Config sent to relayer enclave CID=$CID"
+              break
+            fi
+            echo "Waiting for enclave to accept config... (attempt $i/10)"
+            sleep 3
+          done
+          REMOTE
+          rm -f /tmp/deploy_key
+
+      # ── Health check ──────────────────────────────────────────────────────
+      # chat-relayer currently serves plain HTTP (no in-enclave TLS yet —
+      # rcgen is a declared dependency but not wired into main.rs). Revisit
+      # once self-signed TLS lands, matching the coordinator's pattern.
+      - name: Verify health
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          sleep 10
+          for i in $(seq 1 24); do
+            if curl -s http://localhost:4002/health > /dev/null 2>&1; then
+              echo "Health check passed"
+              curl -s http://localhost:4002/health; echo
+              curl -s http://localhost:4002/enclave_health | jq .
+              exit 0
+            fi
+            echo "Waiting for health... (attempt $i/24)"
+            sleep 5
+          done
+          echo "ERROR: Health check failed after 130s"
+          tail -100 /tmp/chat-relayer.log 2>/dev/null || true
+          exit 1
+          REMOTE
+          rm -f /tmp/deploy_key
