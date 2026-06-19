@@ -5,11 +5,11 @@ use sqlx::PgPool;
 
 use crate::auth::AuthVerifier;
 use crate::config::Config;
+use crate::crypto::MemoryCrypto;
 use crate::db;
 use crate::enclave::Enclave;
 use crate::memory::embed::EmbeddingClient;
 use crate::rate_limit::RateLimiter;
-use crate::seal::SealClient;
 use crate::sui::SuiClient;
 use crate::upstream::UpstreamClient;
 use crate::walrus::WalrusClient;
@@ -20,7 +20,7 @@ pub struct AppState {
     pub enclave: Enclave,
     pub pg: PgPool,
     pub embed: EmbeddingClient,
-    pub seal: SealClient,
+    pub crypto: MemoryCrypto,
     pub walrus: WalrusClient,
     pub sui: SuiClient,
     pub upstream: UpstreamClient,
@@ -49,8 +49,12 @@ impl AppState {
             cfg.embedding_dim,
         );
 
-        let seal = SealClient::new(cfg.sidecar_url.clone(), cfg.sidecar_secret.clone());
-        let walrus = WalrusClient::new(cfg.sidecar_url.clone(), cfg.sidecar_secret.clone());
+        let crypto = MemoryCrypto::new(cfg.memory_encryption_key);
+        let walrus = WalrusClient::new(
+            cfg.walrus_publisher_url.clone(),
+            cfg.walrus_aggregator_url.clone(),
+            cfg.walrus_epochs,
+        );
         let sui = SuiClient::new(cfg.sui_rpc_url.clone());
         let upstream = UpstreamClient::new(cfg.pinaivu_api_base.clone());
         let rate_limiter = RateLimiter::new(redis_mgr, 60);
@@ -61,7 +65,7 @@ impl AppState {
             enclave,
             pg,
             embed,
-            seal,
+            crypto,
             walrus,
             sui,
             upstream,
