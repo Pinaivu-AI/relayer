@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::seal::SealClient;
+use crate::crypto::MemoryCrypto;
 use crate::walrus::WalrusClient;
 
 use super::embed::EmbeddingClient;
@@ -16,14 +16,14 @@ pub struct RecalledMemory {
 pub async fn recall(
     pg: &PgPool,
     embed: &EmbeddingClient,
-    seal: &SealClient,
+    crypto: &MemoryCrypto,
     walrus: &WalrusClient,
     owner_address: &str,
     namespace: &str,
     query: &str,
     top_k: i64,
 ) -> Result<Vec<RecalledMemory>> {
-    let qvec = embed.embed(query).await.context("embed recall query")?;
+    let qvec = embed.embed_query(query).await.context("embed recall query")?;
     // Encode as Postgres vector literal: '[1.0,2.0,...]'
     let vec_literal = format!(
         "[{}]",
@@ -62,10 +62,9 @@ pub async fn recall(
             .await
             .with_context(|| format!("walrus download blob {blob_id}"))?
             .unwrap_or_default();
-        let plaintext_bytes = seal
+        let plaintext_bytes = crypto
             .decrypt(owner_address, &ciphertext)
-            .await
-            .with_context(|| format!("seal decrypt blob {blob_id}"))?;
+            .with_context(|| format!("decrypt blob {blob_id}"))?;
         let plaintext = String::from_utf8(plaintext_bytes).context("utf8 plaintext")?;
         out.push(RecalledMemory {
             id,
