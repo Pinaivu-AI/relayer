@@ -53,6 +53,7 @@ apalis-sql = { version = "0.7", features = ["postgres", "migrate"] }
 
 # Crypto utilities
 aes-gcm = "0.10"
+hkdf = "0.12"
 zeroize = "1"
 base64 = "0.22"
 rand = "0.8"
