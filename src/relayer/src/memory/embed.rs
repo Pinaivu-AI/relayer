@@ -2,6 +2,11 @@
 //! the embedding model + vector dimension per deployment — the
 //! reason chat-relayer carries its own memory stack instead of
 //! delegating to MemWal's relayer.
+//!
+//! Jina's retrieval models are asymmetric: indexing and querying must
+//! use different `task` values or recall quality degrades. Callers use
+//! [`EmbeddingClient::embed_passage`] when storing a memory and
+//! [`EmbeddingClient::embed_query`] when searching for one.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -18,7 +23,9 @@ pub struct EmbeddingClient {
 #[derive(Serialize)]
 struct EmbedReq<'a> {
     model: &'a str,
-    input: &'a str,
+    task: &'a str,
+    normalized: bool,
+    input: Vec<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -46,11 +53,23 @@ impl EmbeddingClient {
         self.dim
     }
 
-    pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+    /// Embed text being stored as a new memory.
+    pub async fn embed_passage(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed(text, "retrieval.passage").await
+    }
+
+    /// Embed a search query against stored memories.
+    pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed(text, "retrieval.query").await
+    }
+
+    async fn embed(&self, text: &str, task: &str) -> Result<Vec<f32>> {
         let url = format!("{}/embeddings", self.api_base.trim_end_matches('/'));
         let mut req = self.http.post(&url).json(&EmbedReq {
             model: &self.model,
-            input: text,
+            task,
+            normalized: true,
+            input: vec![text],
         });
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
