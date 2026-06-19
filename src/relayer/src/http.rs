@@ -86,6 +86,10 @@ pub struct ChatMsg {
 pub struct ChatResp {
     pub content: String,
     pub session_id: Uuid,
+    /// AES-256 key (base64) for this session's Walrus blob. The caller
+    /// must persist this and resend it as `session_key` on every later
+    /// turn of the same session — the relayer never stores it.
+    pub session_key: String,
     pub request_id: Uuid,
     /// Facts recalled from long-term memory that were injected into this turn.
     pub recalled_facts: Vec<String>,
@@ -214,6 +218,7 @@ async fn handle_chat(
     Ok(Json(ChatResp {
         content: reply.content,
         session_id: dispatch.session_id,
+        session_key,
         request_id: reply.request_id,
         recalled_facts,
         latency_ms: reply.latency_ms,
