@@ -1,20 +1,20 @@
 //! chat-relayer — Nitro-enclave Rust service for chat.pinaivu.ai.
 //!
 //! Wraps every chat turn with cross-session memory: recall before the
-//! model, analyze after. Carries its own Seal + Walrus + pgvector stack
-//! (architecturally borrowed from MemWal, configurable for the embedding
-//! model + vector dimension that the chat product needs). Forwards the
-//! actual inference to pinaivu-api → coordinator → node.
+//! model, analyze after. Carries its own encryption + Walrus + pgvector
+//! stack (architecturally borrowed from MemWal, configurable for the
+//! embedding model + vector dimension that the chat product needs).
+//! Forwards the actual inference to pinaivu-api → coordinator → node.
 
 mod auth;
 mod config;
+mod crypto;
 mod db;
 mod enclave;
 mod error;
 mod http;
 mod memory;
 mod rate_limit;
-mod seal;
 mod state;
 mod sui;
 mod telemetry;
