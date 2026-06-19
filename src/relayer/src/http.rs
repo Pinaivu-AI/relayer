@@ -123,7 +123,7 @@ async fn handle_chat(
     let recalled = recall::recall(
         &s.pg,
         &s.embed,
-        &s.seal,
+        &s.crypto,
         &s.walrus,
         &owner_address,
         &req.namespace,
@@ -131,6 +131,7 @@ async fn handle_chat(
         5,
     )
     .await
+    .inspect_err(|e| tracing::warn!(error = %e, "recall failed"))
     .unwrap_or_default();
 
     let recalled_facts: Vec<String> = recalled.iter().map(|r| r.plaintext.clone()).collect();
@@ -186,7 +187,7 @@ async fn handle_chat(
     // Background: analyze the completed turn and store new memory.
     let pg2 = s.pg.clone();
     let embed2 = s.embed.clone();
-    let seal2 = s.seal.clone();
+    let crypto2 = s.crypto.clone();
     let walrus2 = s.walrus.clone();
     let owner2 = owner_address.clone();
     let ns2 = req.namespace.clone();
@@ -194,17 +195,20 @@ async fn handle_chat(
     let user_content = last_msg.content.clone();
     tokio::spawn(async move {
         let turn_text = format!("user: {user_content}\nassistant: {reply_content}");
-        let _ = analyze::analyze(
+        if let Err(e) = analyze::analyze(
             &pg2,
             &embed2,
-            &seal2,
+            &crypto2,
             &walrus2,
             &owner2,
             &ns2,
             dispatch.session_id,
             &turn_text,
         )
-        .await;
+        .await
+        {
+            tracing::warn!(error = %e, "analyze failed");
+        }
     });
 
     Ok(Json(ChatResp {
