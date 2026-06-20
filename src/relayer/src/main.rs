@@ -25,6 +25,14 @@ use anyhow::{Context, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // reqwest/sqlx/redis each pull in rustls, and not all of them select
+    // the same crypto backend (ring vs aws-lc-rs) — with both present in
+    // the dependency tree, rustls can't auto-pick one and panics on the
+    // first TLS handshake. Install one explicitly before anything else.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("install rustls crypto provider");
+
     telemetry::init();
 
     let cfg = config::Config::from_env().context("load chat-relayer config")?;

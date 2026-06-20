@@ -32,6 +32,11 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 # HTTP client (TS sidecar + pinaivu-api + node + Sui RPC)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# Direct dep so we can explicitly install a process-wide CryptoProvider at
+# startup — reqwest/sqlx/redis pull in both ring and aws-lc-rs transitively,
+# and rustls refuses to auto-select when more than one backend is present.
+rustls = "0.23"
+
 # Database — Postgres + pgvector for the chat-relayer's own memory store.
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"] }
 pgvector = { version = "0.4", features = ["sqlx"] }
