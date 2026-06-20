@@ -8,14 +8,8 @@ name = "init"
 path = "src/main.rs"
 
 [dependencies]
-# Support crates supplied at enclave-build time from a sibling checkout
-# of the coordinator repo (same path convention the relayer crate uses
-# for nautilus-enclave / pinaivu-protocol). Not vendored into this repo —
-# the Containerfile's docker build copies them into this relative
-# location from a `--build-context coordinator=...` secondary context.
-aws = { path = "../../../coordinator  /src/aws" }
-system = { path = "../../../coordinator  /src/system" }
+# Owned copies, vendored in-repo — chat-relayer no longer depends on a
+# sibling coordinator checkout (separate EC2 instances, separate repos).
+aws = { path = "../aws" }
+system = { path = "../system" }
 libc = "0.2"
-
-[profile.release]
-panic = "abort"

@@ -11,11 +11,6 @@ concurrency:
 
 env:
   APP_DIR: pinaivu-relayer
-  # Coordinator must already be checked out on the host (its own
-  # deploy.yml keeps this path current) — chat-relayer's Containerfile
-  # needs it as a secondary build context for nautilus-enclave,
-  # pinaivu-protocol, aws, and system.
-  COORDINATOR_DIR: pinaivu-coordinator
   ENCLAVE_CPU: 2
   ENCLAVE_MEM: 2048
   HTTP_VSOCK_PORT: 4002
@@ -83,11 +78,6 @@ jobs:
           set -e
           cd ~/pinaivu-relayer
 
-          if [ ! -d ~/pinaivu-coordinator/src/nautilus-enclave ]; then
-              echo "ERROR: ~/pinaivu-coordinator not found (coordinator's own deploy.yml must run at least once first)"
-              exit 1
-          fi
-
           if [ -f out/.build-sha ] && \
              [ -f out/chat-relayer.eif ] && \
              [ -f out/chat-relayer.pcrs ] && \
@@ -107,7 +97,6 @@ jobs:
           sudo docker buildx build \
             --platform linux/amd64 \
             --progress=plain \
-            --build-context coordinator=$HOME/pinaivu-coordinator \
             --output type=local,dest=out/ \
             -f Containerfile . 2>&1 | tee out/docker.log
           echo "$GIT_SHA" > out/.build-sha

@@ -4,18 +4,9 @@
 # stage — Seal access control + Walrus HTTP are both native Rust now
 # (crypto.rs + walrus.rs), so the only runtime is the Rust binary.
 #
-# nautilus-enclave / pinaivu-protocol / aws / system are NOT vendored
-# into this repo — they're supplied at build time from a sibling
-# checkout of the coordinator repo via a secondary build context:
-#
-#   docker buildx build \
-#     --build-context coordinator=/path/to/coordinator-checkout \
-#     -f Containerfile .
-#
-# That secondary context is copied into the same relative location
-# this repo's Cargo.toml path dependencies already expect for local
-# dev (a sibling "coordinator  " directory), so no Cargo.toml edits
-# are needed between local builds and the enclave build.
+# nautilus-enclave / pinaivu-protocol / aws / system are vendored
+# in-repo under src/ — own copies, independent of the coordinator's
+# repo and EC2 instance. No secondary build context needed.
 #
 # Stages:
 #   base    — stagex toolchain assembled from pinned images
@@ -73,14 +64,12 @@ COPY --from=user-linux-nitro /bzImage .
 COPY --from=user-linux-nitro /nsm.ko .
 COPY --from=user-linux-nitro /linux.config .
 
-# ── Assemble sources: this repo + sibling coordinator checkout ──────────────
-# Recreates the exact directory layout local dev already uses, so
-# the existing path dependencies in src/relayer/Cargo.toml and
-# src/init/Cargo.toml resolve without modification.
+# ── Assemble sources ──────────────────────────────────────────────────────────
+# Everything chat-relayer needs (including the vendored nautilus-enclave,
+# aws, system, pinaivu-protocol crates under src/) lives in this one repo.
 FROM base AS sources
 WORKDIR "/src/pinaivu "
 COPY . "chat-relayer/"
-COPY --from=coordinator . "coordinator  /"
 
 # ── Rust build ───────────────────────────────────────────────────────────────
 FROM sources AS build
