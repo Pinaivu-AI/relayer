@@ -12,7 +12,7 @@ concurrency:
 env:
   APP_DIR: pinaivu-relayer
   ENCLAVE_CPU: 2
-  ENCLAVE_MEM: 2048
+  ENCLAVE_MEM: 4096
   HTTP_VSOCK_PORT: 4002
   CONFIG_VSOCK_PORT: 7000
   POSTGRES_VSOCK_PORT: 8101
@@ -62,6 +62,35 @@ jobs:
                 -i /tmp/deploy_key \
                 "$EC2_USER@$EC2_HOST" \
                 "cat > ~/.env.relayer.runtime && chmod 600 ~/.env.relayer.runtime"
+          rm -f /tmp/deploy_key
+
+      # ── Install deps ──────────────────────────────────────────────────────
+      # First-time setup for a fresh instance — docker, nitro-cli, socat, jq.
+      # Idempotent: skips anything already installed.
+      - name: Install dependencies
+        env:
+          EC2_HOST: ${{ secrets.PINAIVU_EC2_HOST }}
+          EC2_USER: ${{ secrets.PINAIVU_EC2_USER }}
+          EC2_KEY: ${{ secrets.PINAIVU_EC2_SSH_KEY }}
+        run: |
+          echo "$EC2_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH="ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -i /tmp/deploy_key $EC2_USER@$EC2_HOST"
+          $SSH 'bash -s' << 'REMOTE'
+          set -e
+          if command -v dnf &> /dev/null; then PKG="sudo dnf"; else PKG="sudo yum"; fi
+          if ! command -v docker &> /dev/null; then
+            $PKG install -y docker || (curl -fsSL https://get.docker.com | sudo sh)
+            sudo systemctl start docker && sudo systemctl enable docker
+            sudo usermod -aG docker $USER
+          fi
+          if ! command -v nitro-cli &> /dev/null; then
+            $PKG install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel
+            sudo usermod -aG ne $USER
+          fi
+          command -v socat &> /dev/null || $PKG install -y socat
+          command -v jq    &> /dev/null || $PKG install -y jq
+          echo "Dependencies ready"
+          REMOTE
           rm -f /tmp/deploy_key
 
       # ── Build EIF on EC2 ──────────────────────────────────────────────────
@@ -138,6 +167,20 @@ jobs:
             sudo nitro-cli terminate-enclave --enclave-id "$RELAYER_EID" || true
           fi
           sleep 5
+
+          # Same allocator setup as the coordinator's deploy.yml, same
+          # sizing (4096 MiB / 2 vCPUs) — first run on a fresh instance:
+          # the allocator service isn't configured/enabled at all yet.
+          echo 3 | sudo tee /proc/sys/vm/drop_caches   > /dev/null
+          echo 1 | sudo tee /proc/sys/vm/compact_memory > /dev/null
+          sleep 3
+          ALLOC=/etc/nitro_enclaves/allocator.yaml
+          sudo sed -i "s/memory_mib:.*/memory_mib: 4096/" "$ALLOC"
+          sudo sed -i "s/cpu_count:.*/cpu_count: 2/"      "$ALLOC"
+          sudo systemctl enable nitro-enclaves-allocator.service || true
+          sudo systemctl reset-failed nitro-enclaves-allocator.service || true
+          sudo systemctl restart nitro-enclaves-allocator.service
+          sudo systemctl is-active nitro-enclaves-allocator.service
           REMOTE
           rm -f /tmp/deploy_key
 
@@ -154,7 +197,7 @@ jobs:
           set -e
           sudo nitro-cli run-enclave \
             --cpu-count 2 \
-            --memory 2048 \
+            --memory 4096 \
             --eif-path ~/pinaivu-relayer/out/chat-relayer.eif
           sudo nitro-cli describe-enclaves \
             | jq -r '.[] | select(.EIFPath | test("chat-relayer")) | "CID: \(.EnclaveCID)  State: \(.State)"'
