@@ -103,7 +103,9 @@ COPY --from=core-zlib . initramfs
 COPY --from=core-ca-certificates /etc/ssl/certs initramfs/etc/ssl/certs/
 COPY --from=user-socat /bin/socat initramfs/socat
 
-RUN cp "/src/pinaivu /chat-relayer/src/init/target/x86_64-unknown-linux-musl/release/init" initramfs/init
+# src/init is a workspace member now (vendored crates), so cargo places its
+# build output in the workspace root's target/, not src/init/target/.
+RUN cp "/src/pinaivu /chat-relayer/target/x86_64-unknown-linux-musl/release/init" initramfs/init
 RUN cp "/src/pinaivu /chat-relayer/src/relayer/target/x86_64-unknown-linux-musl/release/chat_relayer" initramfs/chat_relayer
 
 RUN <<-EOF
