@@ -161,7 +161,7 @@ jobs:
           # the relayer's distinctive EIF path so a shared host doesn't
           # accidentally kill the coordinator's running enclave.
           RELAYER_EID=$(sudo nitro-cli describe-enclaves \
-            | jq -r '.[] | select(.EnclaveCID != null) | select(.EIFPath | test("chat-relayer")) | .EnclaveID' \
+            | jq -r '.[] | select(.EnclaveCID != null) | select(.EIFPath != null) | select(.EIFPath | test("chat-relayer")) | .EnclaveID' \
             | head -1)
           if [ -n "$RELAYER_EID" ]; then
             sudo nitro-cli terminate-enclave --enclave-id "$RELAYER_EID" || true
@@ -200,7 +200,7 @@ jobs:
             --memory 4096 \
             --eif-path ~/pinaivu-relayer/out/chat-relayer.eif
           sudo nitro-cli describe-enclaves \
-            | jq -r '.[] | select(.EIFPath | test("chat-relayer")) | "CID: \(.EnclaveCID)  State: \(.State)"'
+            | jq -r '.[] | select(.EIFPath != null) | select(.EIFPath | test("chat-relayer")) | "CID: \(.EnclaveCID)  State: \(.State)"'
           REMOTE
           rm -f /tmp/deploy_key
 
@@ -234,7 +234,7 @@ jobs:
           }
 
           CID=$(sudo nitro-cli describe-enclaves \
-            | jq -r '.[] | select(.EIFPath | test("chat-relayer")) | .EnclaveCID' | head -1)
+            | jq -r '.[] | select(.EIFPath != null) | select(.EIFPath | test("chat-relayer")) | .EnclaveCID' | head -1)
           [ -z "$CID" ] && { echo "ERROR: no relayer enclave CID"; exit 1; }
 
           write_unit /etc/systemd/system/pinaivu-relayer-bridge-http.service \
@@ -309,7 +309,7 @@ jobs:
           $SSH 'bash -s' << 'REMOTE'
           set -e
           CID=$(sudo nitro-cli describe-enclaves \
-            | jq -r '.[] | select(.EIFPath | test("chat-relayer")) | .EnclaveCID' | head -1)
+            | jq -r '.[] | select(.EIFPath != null) | select(.EIFPath | test("chat-relayer")) | .EnclaveCID' | head -1)
           if [ -z "$CID" ]; then echo "ERROR: relayer enclave not running"; exit 1; fi
 
           for i in $(seq 1 10); do
