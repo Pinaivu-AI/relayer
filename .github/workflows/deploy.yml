@@ -268,7 +268,6 @@ jobs:
             [embedding]="8104:${EMBEDDING_API_BASE:-}"
             [walrus-pub]="8105:${WALRUS_PUBLISHER_URL:-}"
             [walrus-agg]="8106:${WALRUS_AGGREGATOR_URL:-}"
-            [pinaivu-api]="8107:${PINAIVU_API_BASE:-}"
           )
           for name in "${!egress[@]}"; do
             entry="${egress[$name]}"
@@ -282,6 +281,28 @@ jobs:
               'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=multi-user.target'
           done
 
+          # pinaivu-api is handled separately from the generic egress loop:
+          # PINAIVU_API_BASE is often a bare IP (no real DNS name for the
+          # gateway yet), and the enclave's /etc/hosts redirect trick only
+          # intercepts hostname lookups — connecting by IP literal skips
+          # DNS entirely and has no route inside the enclave. So the app
+          # connects to a friendly synthetic hostname (PINAIVU_API_BASE),
+          # while this bridge dials the real target from a dedicated
+          # PINAIVU_API_BRIDGE_HOST/PORT pair (same pattern as
+          # POSTGRES_BRIDGE_HOST/REDIS_BRIDGE_HOST).
+          API_HOST="${PINAIVU_API_BRIDGE_HOST:-}"
+          API_PORT="${PINAIVU_API_BRIDGE_PORT:-4001}"
+          if [ -z "$API_HOST" ] && [ -n "${PINAIVU_API_BASE:-}" ]; then
+            API_HOST=$(url_host "$PINAIVU_API_BASE")
+            API_PORT=$(url_port "$PINAIVU_API_BASE")
+          fi
+          if [ -n "$API_HOST" ]; then
+            write_unit /etc/systemd/system/pinaivu-relayer-outbound-pinaivu-api.service \
+              '[Unit]' "Description=Relayer outbound pinaivu-api (VSOCK:8107 -> ${API_HOST}:${API_PORT})" 'After=network.target' \
+              '[Service]' "ExecStart=/usr/bin/socat VSOCK-LISTEN:8107,fork,reuseaddr TCP4:${API_HOST}:${API_PORT}" \
+              'Restart=always' 'RestartSec=2' '[Install]' 'WantedBy=multi-user.target'
+          fi
+
           sudo systemctl stop pinaivu-relayer-logs.service 2>/dev/null || true
           sudo truncate -s 0 /tmp/chat-relayer.log 2>/dev/null || true
 
@@ -291,6 +312,7 @@ jobs:
             pinaivu-relayer-logs.service \
             pinaivu-relayer-outbound-postgres.service \
             pinaivu-relayer-outbound-redis.service \
+            $([ -n "$API_HOST" ] && echo "pinaivu-relayer-outbound-pinaivu-api.service") \
             $(for name in "${!egress[@]}"; do [ -n "${egress[$name]#*:}" ] && echo "pinaivu-relayer-outbound-${name}.service"; done)
 
           sleep 2

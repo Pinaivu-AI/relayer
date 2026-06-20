@@ -28,6 +28,10 @@ pub struct Config {
     /// local testing this points directly at the coordinator's HTTPS
     /// endpoint, skipping pinaivu-api/gateway.
     pub pinaivu_api_base: String,
+    /// API key the relayer authenticates to pinaivu-api/gateway with —
+    /// gateway requires `Authorization: Bearer <key>` on every request,
+    /// same as any other client. Issued once via gateway's admin routes.
+    pub pinaivu_api_key: String,
 
     /// Embedding service — OpenAI-compatible HTTP endpoint. Both the
     /// model id and the resulting vector dimension are env-driven so a
@@ -56,6 +60,7 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
             pinaivu_api_base: req("PINAIVU_API_BASE")?,
+            pinaivu_api_key: req("PINAIVU_API_KEY")?,
             embedding_api_base: env_or("EMBEDDING_API_BASE", "https://api.jina.ai/v1"),
             embedding_api_key: std::env::var("EMBEDDING_API_KEY").ok(),
             embedding_model: env_or("EMBEDDING_MODEL", "jina-embeddings-v5-text-small"),

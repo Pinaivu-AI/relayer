@@ -56,7 +56,7 @@ impl AppState {
             cfg.walrus_epochs,
         );
         let sui = SuiClient::new(cfg.sui_rpc_url.clone());
-        let upstream = UpstreamClient::new(cfg.pinaivu_api_base.clone());
+        let upstream = UpstreamClient::new(cfg.pinaivu_api_base.clone(), cfg.pinaivu_api_key.clone());
         let rate_limiter = RateLimiter::new(redis_mgr, 60);
         let auth = AuthVerifier::new();
 
