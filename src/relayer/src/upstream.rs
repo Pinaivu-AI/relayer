@@ -1,14 +1,15 @@
-//! Outbound calls to pinaivu-api → coordinator → node.
+//! Outbound calls to pinaivu-api (the gateway) → coordinator → node.
 //!
-//! The two halves of a chat turn:
-//!   1. `open_chat` posts to `pinaivu-api/v1/chat/completions` so the
-//!      coordinator runs the auction and returns `{ node_url,
-//!      dispatch_token, session_id }`.
-//!   2. `run_inference` posts the actual prompt to the node directly,
-//!      receives the assistant reply.
+//! The coordinator's `/v1/chat/completions` now does the full round
+//! trip itself — auction, then dispatch the job to the winning node
+//! over its existing outbound libp2p connection, then wait for the
+//! reply — and returns the final `content` directly. chat-relayer
+//! calls this exact same endpoint a Path B developer would, just with
+//! a couple of extra fields (`session_key`, `memwal_context`). No
+//! separate relay endpoint needed: the coordinator never expects the
+//! caller to dial the node's HTTP server itself anymore.
 
 use anyhow::{Context, Result};
-use pinaivu_protocol::DispatchToken;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -20,36 +21,22 @@ pub struct UpstreamClient {
 }
 
 #[derive(Serialize)]
-pub struct OpenChatBody<'a> {
-    pub model: &'a str,
-    pub messages: &'a [ChatMessageOut<'a>],
-    pub client_pubkey_hex: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<Uuid>,
-}
-
-#[derive(Serialize)]
 pub struct ChatMessageOut<'a> {
     pub role: &'a str,
     pub content: &'a str,
 }
 
-#[derive(Deserialize)]
-pub struct DispatchResp {
-    pub request_id: Uuid,
-    pub session_id: Uuid,
-    pub node_url: String,
-    pub dispatch_token: DispatchToken,
-}
-
+/// Body for POST {pinaivu_api_base}/v1/chat/completions.
 #[derive(Serialize)]
-pub struct InferenceBody<'a> {
-    pub dispatch_token: &'a DispatchToken,
-    pub session_id: Uuid,
+pub struct ChatCompletionBody<'a> {
+    pub model: &'a str,
+    pub messages: &'a [ChatMessageOut<'a>],
+    pub client_pubkey_hex: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
     /// AES-256 key (base64) so the node can decrypt the Walrus session
     /// blob. The relayer mints + caches per-user/session.
-    pub session_key: String,
-    pub new_user_message: &'a str,
+    pub session_key: &'a str,
     /// Cross-session memory facts recalled from chat-relayer's own
     /// pgvector + Walrus stack. Prepended into the system prompt by the
     /// node's context::assemble.
@@ -62,6 +49,8 @@ pub struct NodeReply {
     pub request_id: Uuid,
     pub session_id: Uuid,
     pub content: String,
+    #[allow(dead_code)]
+    pub session_key: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub latency_ms: u32,
@@ -86,7 +75,7 @@ impl UpstreamClient {
         }
     }
 
-    pub async fn open_chat(&self, body: &OpenChatBody<'_>) -> Result<DispatchResp> {
+    pub async fn chat_completions(&self, body: &ChatCompletionBody<'_>) -> Result<NodeReply> {
         let url = format!(
             "{}/v1/chat/completions",
             self.pinaivu_api_base.trim_end_matches('/')
@@ -106,25 +95,6 @@ impl UpstreamClient {
                 resp.text().await.unwrap_or_default()
             );
         }
-        Ok(resp.json().await.context("decode dispatch resp")?)
-    }
-
-    pub async fn run_inference(&self, node_url: &str, body: &InferenceBody<'_>) -> Result<NodeReply> {
-        let url = format!("{}/v1/inference", node_url.trim_end_matches('/'));
-        let resp = self
-            .http
-            .post(&url)
-            .json(body)
-            .send()
-            .await
-            .with_context(|| format!("POST {url}"))?;
-        if !resp.status().is_success() {
-            anyhow::bail!(
-                "node {}: {}",
-                resp.status(),
-                resp.text().await.unwrap_or_default()
-            );
-        }
-        Ok(resp.json().await.context("decode node reply")?)
+        Ok(resp.json().await.context("decode chat completion reply")?)
     }
 }

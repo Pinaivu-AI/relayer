@@ -10,7 +10,7 @@ use crate::auth::{verify_signature, Authed};
 use crate::error::AppError;
 use crate::memory::{analyze, recall};
 use crate::state::AppState;
-use crate::upstream::{ChatMessageOut, InferenceBody, OpenChatBody};
+use crate::upstream::{ChatCompletionBody, ChatMessageOut};
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
@@ -145,25 +145,8 @@ async fn handle_chat(
         Some(recalled_facts.join("\n"))
     };
 
-    // Open a chat slot on the coordinator (auction → dispatch token).
-    let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
-    let messages_out: Vec<ChatMessageOut<'_>> = req
-        .messages
-        .iter()
-        .map(|m| ChatMessageOut { role: &m.role, content: &m.content })
-        .collect();
-    let dispatch = s
-        .upstream
-        .open_chat(&OpenChatBody {
-            model: &req.model,
-            messages: &messages_out,
-            client_pubkey_hex: &req.delegate_pubkey_hex,
-            session_id: Some(session_id),
-        })
-        .await
-        .map_err(|e| AppError::Upstream(e.to_string()))?;
-
     // Determine session key (caller-supplied or generate a fresh one).
+    let session_id = req.session_id.unwrap_or_else(Uuid::new_v4);
     let session_key = req.session_key.unwrap_or_else(|| {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         use rand::RngCore;
@@ -172,19 +155,24 @@ async fn handle_chat(
         B64.encode(k)
     });
 
-    // Forward inference to the winning node.
+    // The coordinator does the full round trip itself — auction, dispatch
+    // over libp2p to the winning node, wait for the reply — so this is a
+    // single call with no separate node_url hop required.
+    let messages_out: Vec<ChatMessageOut<'_>> = req
+        .messages
+        .iter()
+        .map(|m| ChatMessageOut { role: &m.role, content: &m.content })
+        .collect();
     let reply = s
         .upstream
-        .run_inference(
-            &dispatch.node_url,
-            &InferenceBody {
-                dispatch_token: &dispatch.dispatch_token,
-                session_id: dispatch.session_id,
-                session_key: session_key.clone(),
-                new_user_message: &last_msg.content,
-                memwal_context: memwal_context.as_deref(),
-            },
-        )
+        .chat_completions(&ChatCompletionBody {
+            model: &req.model,
+            messages: &messages_out,
+            client_pubkey_hex: &req.delegate_pubkey_hex,
+            session_id: Some(session_id),
+            session_key: &session_key,
+            memwal_context: memwal_context.as_deref(),
+        })
         .await
         .map_err(|e| AppError::Upstream(e.to_string()))?;
 
@@ -206,7 +194,7 @@ async fn handle_chat(
             &walrus2,
             &owner2,
             &ns2,
-            dispatch.session_id,
+            reply.session_id,
             &turn_text,
         )
         .await
@@ -217,7 +205,7 @@ async fn handle_chat(
 
     Ok(Json(ChatResp {
         content: reply.content,
-        session_id: dispatch.session_id,
+        session_id: reply.session_id,
         session_key,
         request_id: reply.request_id,
         recalled_facts,
